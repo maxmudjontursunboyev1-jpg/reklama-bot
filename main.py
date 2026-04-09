@@ -1,144 +1,203 @@
 import os
 import asyncio
 import logging
-from datetime import datetime
-
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiohttp import web
 
-# --- KONFIGURATSIYA (ENV) ---
+# --- CONFIG ---
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', 7339714216))
-SPREADSHEET_ID = "175HMek0SGGy9u6xKzpdVlbJmppRksKonxSjZNVUA2lQ"
 
-# Loglarni sozlash
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Bot va Dispatcher (Xotira bilan)
 bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# --- GOOGLE SHEETS TIZIMI ---
-def get_sheets():
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-        client = gspread.authorize(creds)
-        return client.open_by_key(SPREADSHEET_ID).sheet1
-    except Exception as e:
-        logger.error(f"Google Sheets ulanish xatosi: {e}")
-        return None
+# --- STATES (Holatlar) ---
+class AdStates(StatesGroup):
+    waiting_for_channel = State()
+    selecting_channels = State()
+    waiting_for_media = State()
+    waiting_for_text = State()
+    waiting_for_btn_name = State()
+    waiting_for_btn_url = State()
+    confirm_ad = State()
 
-def register_user(user: types.User, chat_type):
-    sheet = get_sheets()
-    if sheet:
-        try:
-            user_id = str(user.id)
-            ids = sheet.col_values(1)
-            if user_id not in ids:
-                now = datetime.now().strftime("%d.%m.%Y %H:%M")
-                sheet.append_row([user_id, user.full_name, f"@{user.username}", chat_type, now])
-                logger.info(f"Yangi foydalanuvchi bazaga qo'shildi: {user.full_name}")
-        except Exception as e:
-            logger.error(f"Bazaga yozishda xato: {e}")
+# Foydalanuvchi kanallari (Vaqtincha xotira, buni keyinchalik Sheetsga ulash mumkin)
+# {user_id: {channel_id: "Channel Title"}}
+user_channels = {}
 
-# --- ADMIN KLAVIATURASI ---
-def admin_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("📊 Statistika", callback_data="stats"),
-        types.InlineKeyboardButton("📢 Reklama (Yangi)", callback_data="send_ad"),
-        types.InlineKeyboardButton("🔄 Forward Reklama", callback_data="forward_ad"),
-        types.InlineKeyboardButton("📄 Bazani ko'rish", url=f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
-    )
+# --- KEYBOARDS ---
+def main_menu(user_id):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("➕ Kanal qo'shish", "📢 Reklama yuborish")
+    kb.row("📊 Statistika", "❓ Yordam")
     return kb
 
-# --- HANDLERLAR ---
+# --- HANDLERS ---
 
-# Admin Panel (Faqat Admin uchun)
-@dp.message_handler(commands=['admin'], user_id=ADMIN_ID)
-async def admin_panel(message: types.Message):
-    await message.answer("🛠 <b>Admin Panelga xush kelibsiz!</b>\nQuyidagi amallardan birini tanlang:", reply_markup=admin_keyboard())
-
-# Start Buyrug'i
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    register_user(message.from_user, message.chat.type)
-    
-    welcome_text = (
-        f"<b>Assalomu alaykum, {message.from_user.first_name}!</b> 👋\n\n"
-        "Men professional botman. Xizmatlarimizdan foydalanish uchun "
-        "quyidagi menyulardan foydalanishingiz mumkin."
-    )
-    
-    # Oddiy foydalanuvchi uchun tugmalar (ixtiyoriy qo'shish mumkin)
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("ℹ️ Ma'lumot", "📞 Aloqa")
-    
-    await message.answer(welcome_text, reply_markup=kb)
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("💡 Siz adminsiz, /admin buyrug'ini yozishingiz mumkin.")
+    await message.answer(f"👋 Salom {message.from_user.first_name}!\nReklama menejeri botiga xush kelibsiz.", 
+                         reply_markup=main_menu(message.from_user.id))
 
-# Statistika Callback
-@dp.callback_query_handler(text="stats", user_id=ADMIN_ID)
-async def show_stats(call: types.CallbackQuery):
-    sheet = get_sheets()
-    if sheet:
-        count = len(sheet.col_values(1)) - 1
-        await call.message.edit_text(f"📊 <b>Bot statistikasi:</b>\n\nJami foydalanuvchilar: <b>{count} ta</b>", reply_markup=admin_keyboard())
+# 1. KANAL QO'SHISH
+@dp.message_handler(text="➕ Kanal qo'shish")
+async def add_channel_start(message: types.Message):
+    await message.answer("📢 Kanalni qo'shish uchun:\n1. Botni kanalda <b>Admin</b> qiling.\n2. Kanaldan bitta xabarni menga <b>Forward</b> qiling.")
+    await AdStates.waiting_for_channel.set()
+
+@dp.message_handler(state=AdStates.waiting_for_channel, is_forwarded=True, content_types=types.ContentTypes.ANY)
+async def process_channel_add(message: types.Message, state: FSMContext):
+    if message.forward_from_chat:
+        chat = message.forward_from_chat
+        uid = message.from_user.id
+        
+        if uid not in user_channels: user_channels[uid] = {}
+        user_channels[uid][chat.id] = chat.title
+        
+        await message.answer(f"✅ Kanal qo'shildi: <b>{chat.title}</b>", reply_markup=main_menu(uid))
+        await state.finish()
     else:
-        await call.answer("Baza bilan bog'lanib bo'lmadi.")
+        await message.answer("❌ Bu kanal emas. Iltimos, kanaldan xabar uzating.")
 
-# Reklama yuborish bosqichi
-@dp.callback_query_handler(text=["send_ad", "forward_ad"], user_id=ADMIN_ID)
-async def ad_type_chosen(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(ad_type=call.data)
-    await call.message.answer("📝 Reklama xabarini yuboring (matn, rasm yoki video):")
-    await state.set_state("waiting_for_ad_content")
+# 2. REKLAMA YUBORISH (KANAL TANLASH)
+@dp.message_handler(text="📢 Reklama yuborish")
+async def start_ad(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if uid not in user_channels or not user_channels[uid]:
+        return await message.answer("🤷‍♂️ Avval kanal qo'shishingiz kerak.")
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for cid, title in user_channels[uid].items():
+        kb.add(types.InlineKeyboardButton(f"❌ {title}", callback_data=f"select_{cid}"))
+    kb.add(types.InlineKeyboardButton("✅ Tanladim", callback_data="channels_done"))
+    
+    await message.answer("📍 Reklama yubormoqchi bo'lgan kanallaringizni tanlang:", reply_markup=kb)
+    await state.update_data(selected_channels=[])
+    await AdStates.selecting_channels.set()
 
-@dp.message_handler(state="waiting_for_ad_content", content_types=types.ContentTypes.ANY, user_id=ADMIN_ID)
-async def broadcast_ad(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data.startswith('select_'), state=AdStates.selecting_channels)
+async def toggle_channel(call: types.CallbackQuery, state: FSMContext):
+    cid = int(call.data.split('_')[1])
     data = await state.get_data()
-    ad_type = data.get("ad_type")
+    selected = data.get('selected_channels', [])
+    
+    if cid in selected: selected.remove(cid)
+    else: selected.append(cid)
+    
+    await state.update_data(selected_channels=selected)
+    
+    # Tugmalarni yangilash (Yashil belgi qo'yish)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for ch_id, title in user_channels[call.from_user.id].items():
+        mark = "✅" if ch_id in selected else "❌"
+        kb.add(types.InlineKeyboardButton(f"{mark} {title}", callback_data=f"select_{ch_id}"))
+    kb.add(types.InlineKeyboardButton("🚀 Tanladim", callback_data="channels_done"))
+    
+    await call.message.edit_reply_markup(reply_markup=kb)
+
+@dp.callback_query_handler(text="channels_done", state=AdStates.selecting_channels)
+async def channels_selected(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get('selected_channels'):
+        return await call.answer("⚠️ Kamida bitta kanal tanlang!", show_alert=True)
+    
+    await call.message.answer("🖼 Endi rasm yoki video yuboring (yoki /skip):")
+    await AdStates.waiting_for_media.set()
+
+# 3. KONTENT YIG'ISH
+@dp.message_handler(state=AdStates.waiting_for_media, content_types=[types.ContentType.PHOTO, types.ContentType.VIDEO, types.ContentType.TEXT])
+async def process_media(message: types.Message, state: FSMContext):
+    if message.photo:
+        await state.update_data(file_id=message.photo[-1].file_id, file_type='photo')
+    elif message.video:
+        await state.update_data(file_id=message.video.file_id, file_type='video')
+    
+    await message.answer("✍️ Reklama matnini (tavsifini) yuboring:")
+    await AdStates.waiting_for_text.set()
+
+@dp.message_handler(state=AdStates.waiting_for_text)
+async def process_text(message: types.Message, state: FSMContext):
+    await state.update_data(ad_text=message.text)
+    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("➕ Tugma qo'shish", callback_data="add_btn"),
+                                          types.InlineKeyboardButton("⏩ O'tkazib yuborish", callback_data="preview"))
+    await message.answer("🔗 Reklamaga tugma qo'shasizmi?", reply_markup=kb)
+
+@dp.callback_query_handler(text="add_btn", state=AdStates.waiting_for_text)
+async def ask_btn_name(call: types.CallbackQuery):
+    await call.message.answer("📝 Tugma nomini yuboring:")
+    await AdStates.waiting_for_btn_name.set()
+
+@dp.message_handler(state=AdStates.waiting_for_btn_name)
+async def process_btn_name(message: types.Message, state: FSMContext):
+    await state.update_data(btn_name=message.text)
+    await message.answer("🔗 Tugma manzilini (URL) yuboring:")
+    await AdStates.waiting_for_btn_url.set()
+
+@dp.message_handler(state=AdStates.waiting_for_btn_url)
+async def process_btn_url(message: types.Message, state: FSMContext):
+    if not message.text.startswith('http'):
+        return await message.answer("❌ Noto'g'ri URL. Link http yoki https bilan boshlanishi shart.")
+    await state.update_data(btn_url=message.text)
+    await show_preview(message, state)
+
+async def show_preview(message, state):
+    data = await state.get_data()
+    text = data.get('ad_text')
+    kb = types.InlineKeyboardMarkup()
+    if data.get('btn_name'):
+        kb.add(types.InlineKeyboardButton(data['btn_name'], url=data['btn_url']))
+    
+    await message.answer("🧐 Reklama ko'rinishi:")
+    if data.get('file_type') == 'photo':
+        await bot.send_photo(message.chat.id, data['file_id'], caption=text, reply_markup=kb)
+    elif data.get('file_type') == 'video':
+        await bot.send_video(message.chat.id, data['file_id'], caption=text, reply_markup=kb)
+    else:
+        await bot.send_message(message.chat.id, text, reply_markup=kb)
+    
+    confirm_kb = types.ReplyKeyboardMarkup(resize_keyboard=True).row("✅ Tasdiqlash", "❌ Bekor qilish")
+    await message.answer("Reklamani tanlangan kanallarga yuboramizmi?", reply_markup=confirm_kb)
+    await AdStates.confirm_ad.set()
+
+@dp.message_handler(state=AdStates.confirm_ad, text="✅ Tasdiqlash")
+async def final_send(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    channels = data.get('selected_channels')
+    
+    kb = types.InlineKeyboardMarkup()
+    if data.get('btn_name'):
+        kb.add(types.InlineKeyboardButton(data['btn_name'], url=data['btn_url']))
+
+    success = 0
+    for cid in channels:
+        try:
+            if data.get('file_type') == 'photo':
+                await bot.send_photo(cid, data['file_id'], caption=data['ad_text'], reply_markup=kb)
+            elif data.get('file_type') == 'video':
+                await bot.send_video(cid, data['file_id'], caption=data['ad_text'], reply_markup=kb)
+            else:
+                await bot.send_message(cid, data['ad_text'], reply_markup=kb)
+            success += 1
+        except Exception as e:
+            logging.error(f"Xato: {e}")
+
+    await message.answer(f"🚀 Reklama {success} ta kanalga yuborildi!", reply_markup=main_menu(message.from_user.id))
     await state.finish()
 
-    sheet = get_sheets()
-    user_ids = sheet.col_values(1)[1:] # Sarlavhadan tashqari hamma IDlar
-    
-    success, fail = 0, 0
-    msg = await message.answer("🚀 Tarqatish boshlandi...")
-
-    for uid in user_ids:
-        try:
-            if ad_type == "forward_ad":
-                await bot.forward_message(uid, message.chat.id, message.message_id)
-            else:
-                await bot.copy_message(uid, message.chat.id, message.message_id)
-            success += 1
-            await asyncio.sleep(0.05) # Telegram bloklamasligi uchun
-        except Exception:
-            fail += 1
-            
-    await msg.edit_text(f"✅ <b>Natija:</b>\n\nYuborildi: {success} ta\nMuvaffaqiyatsiz: {fail} ta")
-
-# --- WEB SERVER (RENDER UCHUN) ---
-async def handle(request):
-    return web.Response(text="Bot is operational. 🛡️")
-
+# --- WEB SERVER ---
+async def handle(request): return web.Response(text="Ads Bot Active 🔊")
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
-    await site.start()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
