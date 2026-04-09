@@ -1,157 +1,124 @@
-import logging
-import sqlite3
-import io
+import os
 import asyncio
+import logging
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor, exceptions
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+from aiohttp import web
 
 # --- KONFIGURATSIYA ---
-API_TOKEN = '7732017441:AAF-sL-zc0-AaR6r1XltVh851_23TpxGlQA'
-ADMIN_ID = 7339714216  # Sizning ID
+API_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
+SPREADSHEET_ID = "175HMek0SGGy9u6xKzpdVlbJmppRksKonxSjZNVUA2lQ"
 
+# Logging sozlamalari
 logging.basicConfig(level=logging.INFO)
-storage = MemoryStorage()
 bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(bot)
 
-# --- BAZA MANTIQI ---
-class Database:
-    def __init__(self, db_name='pro_adv_bot.db'):
-        self.conn = sqlite3.connect(db_name)
-        self.cursor = self.conn.cursor()
-        self.create_tables()
+# --- GOOGLE SHEETS BILAN ISHLASH ---
+def get_sheets():
+    """Google Sheets API-ga ulanish"""
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    # credentials.json fayli root papkada bo'lishi shart
+    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID).sheet1
 
-    def create_tables(self):
-        self.cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-        self.cursor.execute('CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY, title TEXT, type TEXT, added_by INTEGER)')
-        self.conn.commit()
+def log_to_sheet(chat_id, title, chat_type, user_id):
+    """Ma'lumotlarni jadvalga yozish"""
+    try:
+        sheet = get_sheets()
+        ids = sheet.col_values(1)
+        if str(chat_id) not in ids:
+            sheet.append_row([str(chat_id), str(title), str(chat_type), str(user_id)])
+            logging.info(f"Yangi yozuv qo'shildi: {title}")
+    except Exception as e:
+        logging.error(f"Google Sheets bilan xatolik: {e}")
 
-    def add_user(self, user_id):
-        self.cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
-        self.conn.commit()
-
-    def add_chat(self, chat_id, title, c_type, user_id):
-        self.cursor.execute('INSERT OR REPLACE INTO chats VALUES (?, ?, ?, ?)', (chat_id, title, c_type, user_id))
-        self.conn.commit()
-
-    def remove_chat(self, chat_id):
-        self.cursor.execute('DELETE FROM chats WHERE chat_id = ?', (chat_id,))
-        self.conn.commit()
-
-db = Database()
-
-# --- FSM (HOLATLAR) ---
-class AdStates(StatesGroup):
-    waiting_for_ad_content = State()
-    waiting_for_buttons = State()
-    confirm_send = State()
-
-# --- ADMIN KLAVIATURASI ---
-def get_admin_kb():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📢 Global Reklama", callback_data="admin_broadcast"),
-        InlineKeyboardButton("📊 Statistika", callback_data="admin_stats"),
-        InlineKeyboardButton("📂 Guruhlar Fayli", callback_data="admin_file"),
-        InlineKeyboardButton("🧹 Tozalash", callback_data="admin_cleanup")
-    )
-    return kb
-
-# --- ASOSIY HANDLERLAR ---
+# --- BOT HANDLERLARI ---
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    db.add_user(message.from_user.id)
-    text = "<b>Assalomu alaykum, Professional Reklama Botiga xush kelibsiz!</b> 💎\n\n"
+    """/start buyrug'i va foydalanuvchini ro'yxatga olish"""
+    log_to_sheet(message.from_user.id, message.from_user.full_name, "USER", message.from_user.id)
+    
+    welcome_text = (
+        f"Salom {message.from_user.first_name}! <tg-emoji id='5432490150935534230'>✨</tg-emoji>\n"
+        "Professional reklama botiga xush kelibsiz.\n\n"
+        "Bot barcha guruh va kanallarni avtomatik jadvalga yozib boradi."
+    )
+    
+    kb = types.InlineKeyboardMarkup()
     if message.from_user.id == ADMIN_ID:
-        text += "Siz bot adminisiz. Boshqaruv panelidan foydalanishingiz mumkin 👇"
-        await message.answer(text, reply_markup=get_admin_kb())
-    else:
-        await message.answer(text + "Botni guruhlarga qo'shing va reklama imkoniyatlaridan foydalaning.")
+        kb.add(types.InlineKeyboardButton("📢 Reklama yuborish", callback_data="admin_broadcast"))
+        kb.add(types.InlineKeyboardButton("📊 Statistika", callback_data="admin_stats"))
+        
+    await message.answer(welcome_text, reply_markup=kb)
 
-# Botni guruhga qo'shganda/chiqarganda
 @dp.my_chat_member_handler()
-async def chat_m_handler(update: types.ChatMemberUpdated):
+async def on_bot_added(update: types.ChatMemberUpdated):
+    """Bot guruh yoki kanalga qo'shilganda ishlaydi"""
     if update.new_chat_member.status in ['administrator', 'member']:
-        db.add_chat(update.chat.id, update.chat.title, update.chat.type, update.from_user.id)
-    elif update.new_chat_member.status in ['left', 'kicked']:
-        db.db.remove_chat(update.chat.id)
+        chat_title = update.chat.title or update.chat.full_name
+        log_to_sheet(update.chat.id, chat_title, update.chat.type, update.from_user.id)
 
-# --- REKLAMA YARATISH (FSM) ---
+# --- ADMIN REKLAMA TIZIMI ---
 
 @dp.callback_query_handler(text="admin_broadcast", user_id=ADMIN_ID)
-async def start_broadcast(call: types.CallbackQuery):
-    await call.message.answer("Reklama matnini yoki rasm/video yuboring: \n(Bekor qilish uchun /cancel)")
-    await AdStates.waiting_for_ad_content.set()
+async def ask_ad(call: types.CallbackQuery):
+    await call.message.answer("Reklama xabaringizni yuboring (Matn, Rasm, Video yoki Sticker).\nUni barcha manzillarga yuboraman!")
 
-@dp.message_handler(state=AdStates.waiting_for_ad_content, content_types=types.ContentTypes.ANY)
-async def get_content(message: types.Message, state: FSMContext):
-    await state.update_data(message_id=message.message_id, chat_id=message.chat.id)
-    await message.answer("Tugmalar qo'shasizmi? Format: <code>Nom - Link</code>\nHar bir tugmani yangi qatordan yozing. Yo'q bo'lsa 'Xayr' deb yozing.")
-    await AdStates.waiting_for_buttons.set()
+@dp.message_handler(user_id=ADMIN_ID, content_types=types.ContentTypes.ANY)
+async def start_broadcast(message: types.Message):
+    if message.text == "/start": return # Startni reklama qilmaslik uchun
 
-@dp.message_handler(state=AdStates.waiting_for_buttons)
-async def get_buttons(message: types.Message, state: FSMContext):
-    kb = InlineKeyboardMarkup()
-    if message.text.lower() != 'xayr':
-        lines = message.text.split('\n')
-        for line in lines:
-            try:
-                name, url = line.split('-')
-                kb.add(InlineKeyboardButton(text=name.strip(), url=url.strip()))
-            except:
-                continue
+    sheet = get_sheets()
+    targets = sheet.col_values(1)[1:] # Sarlavhadan keyingi barcha ID'lar
     
-    await state.update_data(buttons=kb)
-    data = await state.get_data()
-    await message.answer("Reklama tayyor. Uni hamma joyga yuboramizmi?", reply_markup=InlineKeyboardMarkup().add(
-        InlineKeyboardButton("✅ Ha, yuborilsin", callback_data="confirm_yes"),
-        InlineKeyboardButton("❌ Yo'q", callback_data="confirm_no")
-    ))
-    await AdStates.confirm_send.set()
-
-@dp.callback_query_handler(state=AdStates.confirm_send)
-async def final_step(call: types.CallbackQuery, state: FSMContext):
-    if call.data == "confirm_yes":
-        data = await state.get_data()
-        db.cursor.execute("SELECT chat_id FROM chats")
-        chats = db.cursor.fetchall()
-        db.cursor.execute("SELECT user_id FROM users")
-        users = db.cursor.fetchall()
-        
-        targets = list(set([c[0] for c in chats] + [u[0] for u in users]))
-        
-        count = 0
-        await call.message.answer(f"🚀 Reklama {len(targets)} ta manzilga yuborilmoqda...")
-        
-        for tid in targets:
-            try:
-                await bot.copy_message(tid, data['chat_id'], data['message_id'], reply_markup=data['buttons'])
-                count += 1
-                await asyncio.sleep(0.05) # Flood himoyasi
-            except exceptions.BotBlocked: continue
-            except exceptions.ChatNotFound: continue
-            except: continue
+    await message.answer(f"🚀 Tarqatish boshlandi: {len(targets)} ta manzilga...")
+    
+    success = 0
+    for tid in targets:
+        try:
+            # Har qanday turdagi xabarni nusxalash (copy_message)
+            await bot.copy_message(chat_id=tid, from_chat_id=message.chat.id, message_id=message.message_id)
+            success += 1
+            await asyncio.sleep(0.05) # Flood himoyasi
+        except Exception:
+            continue
             
-        await call.message.answer(f"✅ Tayyor! {count} ta manzilga yetkazildi.")
-    else:
-        await call.message.answer("Reklama bekor qilindi.")
-    
-    await state.finish()
-
-# --- STATISTIKA VA FILER ---
+    await message.answer(f"✅ Tarqatish tugadi.\nMuallafaqiyatli: {success} ta.")
 
 @dp.callback_query_handler(text="admin_stats", user_id=ADMIN_ID)
-async def admin_stats(call: types.CallbackQuery):
-    db.cursor.execute("SELECT COUNT(*) FROM users")
-    u = db.cursor.fetchone()[0]
-    db.cursor.execute("SELECT COUNT(*) FROM chats")
-    c = db.cursor.fetchone()[0]
-    await call.message.answer(f"📊 <b>Statistika:</b>\n\n👤 Userlar: {u}\n🏢 Chatlar: {c}")
+async def show_stats(call: types.CallbackQuery):
+    sheet = get_sheets()
+    count = len(sheet.col_values(1)) - 1
+    await call.answer(f"Jami manzillar: {count} ta", show_alert=True)
+
+# --- RENDER WEB SERVER (Uyg'oq tutish uchun) ---
+
+async def handle(request):
+    """Web-serverga so'rov kelganda javob berish"""
+    return web.Response(text="Bot is running! 🚀")
+
+async def on_startup(dispatcher):
+    logging.info("Bot ishga tushirildi!")
+
+# --- ISHGA TUSHIRISH ---
 
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    # Render beradigan portni olish
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Web App yaratish
+    app = web.Application()
+    app.router.add_get("/", handle)
+    
+    # Botni polling rejimida ishga tushirish (web server bilan parallel)
+    loop = asyncio.get_event_loop()
+    loop.create_task(dp.start_polling())
+    
+    # Web serverni ishga tushirish
+    web.run_app(app, host="0.0.0.0", port=port)
