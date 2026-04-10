@@ -4,16 +4,16 @@ import aiohttp
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 
+# ================= CONFIG =================
 API_TOKEN = "7732017441:AAEBr-MUe_1MpdE3Ahpv5CAXwDxEYRMvYyA"
-ADMIN_ID = 7339714216  # <-- o'zgartiring
+ADMIN_ID = 7339714216
 
-# Google Apps Script URL
 API_URL = "https://script.google.com/macros/s/AKfycbzffXKXTzbGARB68yt9h65hVvI9f9qRmz89ZR-ilmhOCSB2F1AeRWvGpfPuhQ8apE7niA/exec"
 
 logging.basicConfig(level=logging.INFO)
@@ -21,45 +21,77 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# ================= FSM =================
+# ================= STATES =================
 class AddChannel(StatesGroup):
     waiting_forward = State()
 
 class AdState(StatesGroup):
-    selecting_channels = State()
-    waiting_content = State()
+    selecting = State()
+    content = State()
 
-# ================= MENU =================
-def main_menu(user_id):
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("➕ Kanal qo'shish"))
-    kb.add(KeyboardButton("📢 Reklama yuborish"))
-    if user_id == ADMIN_ID:
-        kb.add(KeyboardButton("📊 Statistika"))
-    return kb
+# ================= SMART EMOJI =================
+def smart_format(text: str):
+    text_low = text.lower()
+    emojis = []
+
+    if "kino" in text_low:
+        emojis.append("🎬")
+    if "aksiya" in text_low:
+        emojis.append("🔥")
+    if "chegirma" in text_low:
+        emojis.append("💸")
+    if "yangilik" in text_low:
+        emojis.append("🆕")
+
+    return " ".join(emojis) + " " + text + " 🚀"
 
 # ================= API =================
-async def get_channels(user_id):
+async def api_get(user_id):
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{API_URL}?action=get&user_id={user_id}") as resp:
             return await resp.json()
 
-async def add_channel(user_id, channel_id, title):
+async def api_add(user_id, channel_id, title):
     async with aiohttp.ClientSession() as session:
         await session.get(
             f"{API_URL}?action=add&user_id={user_id}&channel_id={channel_id}&title={title}"
         )
 
+# ================= UI =================
+def main_menu(user_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("➕ Kanal qo'shish", callback_data="add"))
+    kb.add(InlineKeyboardButton("📢 Reklama yaratish", callback_data="ads"))
+
+    if user_id == ADMIN_ID:
+        kb.add(InlineKeyboardButton("📊 Statistika", callback_data="stats"))
+
+    return kb
+
+def channels_kb(channels, selected):
+    kb = InlineKeyboardMarkup()
+    for ch in channels:
+        cid = str(ch["channel_id"])
+        icon = "🟢" if cid in selected else "⚪"
+
+        kb.add(InlineKeyboardButton(
+            f"{icon} {ch['title']}",
+            callback_data=f"toggle:{cid}"
+        ))
+
+    kb.add(InlineKeyboardButton("✅ Tanladim", callback_data="done"))
+    return kb
+
 # ================= START =================
 @dp.message_handler(commands=['start'])
 async def start(msg: types.Message):
-    await msg.answer("👋 Salom!\nProfessional Ads Manager Botga xush kelibsiz!",
+    await msg.answer("👋 Professional Ads Manager Bot",
                      reply_markup=main_menu(msg.from_user.id))
 
 # ================= ADD CHANNEL =================
-@dp.message_handler(lambda m: m.text == "➕ Kanal qo'shish")
-async def add_channel_start(msg: types.Message):
-    await msg.answer("📩 Kanal postidan *forward* qilib yuboring")
+@dp.callback_query_handler(lambda c: c.data == "add")
+async def add_start(call: types.CallbackQuery):
+    await call.message.edit_text("📩 Kanal postini forward qiling")
     await AddChannel.waiting_forward.set()
 
 @dp.message_handler(state=AddChannel.waiting_forward, content_types=types.ContentType.ANY)
@@ -69,120 +101,109 @@ async def save_channel(msg: types.Message, state: FSMContext):
 
     chat = msg.forward_from_chat
 
-    await add_channel(msg.from_user.id, chat.id, chat.title)
+    await api_add(msg.from_user.id, chat.id, chat.title)
 
-    await msg.answer(f"✅ Kanal qo'shildi:\n{chat.title}")
+    await msg.answer(f"✅ Qo'shildi: {chat.title}")
     await state.finish()
 
-# ================= INLINE KEYBOARD =================
-def build_channels_keyboard(channels, selected):
-    kb = InlineKeyboardMarkup()
-    for ch in channels:
-        cid = str(ch['channel_id'])
-        title = ch['title']
-
-        icon = "🟢" if cid in selected else "⚪"
-
-        kb.add(InlineKeyboardButton(
-            f"{icon} {title}",
-            callback_data=f"toggle:{cid}"
-        ))
-
-    kb.add(InlineKeyboardButton("✅ Tanladim", callback_data="done"))
-    return kb
-
 # ================= ADS =================
-@dp.message_handler(lambda m: m.text == "📢 Reklama yuborish")
-async def ads_start(msg: types.Message, state: FSMContext):
-    user_id = msg.from_user.id
+@dp.callback_query_handler(lambda c: c.data == "ads")
+async def ads(call: types.CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
 
     if user_id == ADMIN_ID:
-        channels = await get_channels("all")
+        channels = await api_get("all")
     else:
-        channels = await get_channels(user_id)
+        channels = await api_get(user_id)
 
-    await state.update_data(
-        channels=channels,
-        selected=[]
-    )
+    await state.update_data(channels=channels, selected=[])
 
-    await msg.answer(
+    await call.message.edit_text(
         "📌 Kanallarni tanlang:",
-        reply_markup=build_channels_keyboard(channels, [])
+        reply_markup=channels_kb(channels, [])
     )
 
-    await AdState.selecting_channels.set()
+    await AdState.selecting.set()
 
 # ================= TOGGLE =================
-@dp.callback_query_handler(lambda c: c.data.startswith("toggle"), state=AdState.selecting_channels)
-async def toggle_channel(call: types.CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data.startswith("toggle"), state=AdState.selecting)
+async def toggle(call: types.CallbackQuery, state: FSMContext):
     cid = call.data.split(":")[1]
 
     data = await state.get_data()
-    selected = data.get("selected", [])
-    channels = data.get("channels", [])
+    selected = set(data.get("selected", []))
 
     if cid in selected:
         selected.remove(cid)
     else:
-        selected.append(cid)
+        selected.add(cid)
 
-    await state.update_data(selected=selected)
+    await state.update_data(selected=list(selected))
 
     await call.message.edit_reply_markup(
-        reply_markup=build_channels_keyboard(channels, selected)
+        reply_markup=channels_kb(data["channels"], selected)
     )
 
     await call.answer()
 
 # ================= DONE =================
-@dp.callback_query_handler(lambda c: c.data == "done", state=AdState.selecting_channels)
-async def done_select(call: types.CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data == "done", state=AdState.selecting)
+async def done(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    selected = data.get("selected", [])
 
-    if not selected:
-        return await call.answer("❗ Hech narsa tanlanmadi", show_alert=True)
+    if not data.get("selected"):
+        return await call.answer("❗ Tanlanmadi", show_alert=True)
 
-    await call.message.answer("📩 Endi reklama kontentini yuboring (text/photo/video)")
-    await AdState.waiting_content.set()
+    await call.message.edit_text("📩 Kontent yuboring (text/photo/video)")
+    await AdState.content.set()
 
-# ================= SEND ADS =================
-@dp.message_handler(state=AdState.waiting_content, content_types=types.ContentType.ANY)
+# ================= SEND =================
+@dp.message_handler(state=AdState.content, content_types=types.ContentType.ANY)
 async def send_ads(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     selected = data.get("selected", [])
+
+    text = msg.text or msg.caption or ""
+    smart_text = smart_format(text) if text else None
 
     success = 0
 
     for cid in selected:
         try:
-            await msg.send_copy(chat_id=int(cid))
+            if msg.content_type == "text":
+                await bot.send_message(
+                    chat_id=int(cid),
+                    text=smart_text,
+                    entities=msg.entities
+                )
+            else:
+                await msg.send_copy(chat_id=int(cid))
+
             success += 1
         except Exception as e:
             print("ERROR:", e)
 
-    await msg.answer(f"✅ Yuborildi: {success} ta kanalga")
-
+    await msg.answer(f"✅ {success} ta kanalga yuborildi 🚀")
     await state.finish()
 
-# ================= WEB SERVER =================
-async def handle(request):
-    return web.Response(text="Bot is running")
+# ================= WEB =================
+async def handler(request):
+    return web.Response(text="Bot running")
 
-async def start_web_app():
+async def start_web():
     app = web.Application()
-    app.router.add_get('/', handle)
+    app.router.add_get("/", handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
 
-# ================= MAIN =================
+# ================= STARTUP =================
 async def on_startup(dp):
-    asyncio.create_task(start_web_app())
+    asyncio.create_task(start_web())
     print("🚀 Bot ishga tushdi")
 
-if __name__ == '__main__':
+# ================= RUN =================
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
