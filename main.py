@@ -9,8 +9,8 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 
-API_TOKEN = "7732017441:AAG9hIrPYuWiSRcNtJoo8uyXP2qJVSf4YpM"
-API_URL = "https://script.google.com/macros/s/AKfycbxXesDKnT-BR8qHYNZm8X-WbdasojOr9-R2xN57nLlWvE3ARTy8poxs-e_Ss73svpiLXA/exec"
+API_TOKEN = "7732017441:AAFH6HZrWQTqwMr1mp-u0t4xnnX9eePbt6w"
+API_URL = "https://script.google.com/macros/s/AKfycbw7uZSzJxFVXTsbvf6-s35qujZcKtyQGqSTNeZTI0_9Bqbe2dYHebfIzbmWolOc0oC47Q/exec"
 ADMIN_ID = 7339714216
 
 logging.basicConfig(level=logging.INFO)
@@ -30,11 +30,22 @@ class AdState(StatesGroup):
     button_text = State()
     button_url = State()
 
-# ================= API =================
+# ================= SAFE API =================
+async def safe_json(r):
+    try:
+        return await r.json()
+    except:
+        txt = await r.text()
+        print("API RAW:", txt)
+        return []
+
 async def api_get(user_id):
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{API_URL}?action=get&user_id={user_id}") as r:
-            return await r.json()
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{API_URL}?action=get&user_id={user_id}") as r:
+                return await safe_json(r)
+    except:
+        return []
 
 async def api_add(user_id, chat_id, title, type_):
     title = quote(title)
@@ -42,7 +53,7 @@ async def api_add(user_id, chat_id, title, type_):
         async with s.get(
             f"{API_URL}?action=add&user_id={user_id}&chat_id={chat_id}&title={title}&type={type_}"
         ) as r:
-            return await r.json()
+            return await safe_json(r)
 
 async def log_ads(user_id, count):
     async with aiohttp.ClientSession() as s:
@@ -51,7 +62,7 @@ async def log_ads(user_id, count):
 async def get_stats():
     async with aiohttp.ClientSession() as s:
         async with s.get(f"{API_URL}?action=stats") as r:
-            return await r.json()
+            return await safe_json(r)
 
 # ================= UI =================
 def main_menu(user_id):
@@ -183,7 +194,7 @@ async def done(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("📩 Kontent yuboring")
     await AdState.content.set()
 
-# ================= CONTENT + PREVIEW =================
+# ================= CONTENT =================
 @dp.message_handler(state=AdState.content, content_types=types.ContentType.ANY)
 async def content(msg: types.Message, state: FSMContext):
     await state.update_data(content=msg, buttons=[])
@@ -198,33 +209,6 @@ async def content(msg: types.Message, state: FSMContext):
     await msg.answer("Davom etamizmi?", reply_markup=kb)
     await AdState.buttons.set()
 
-# ================= BUTTON =================
-@dp.callback_query_handler(lambda c: c.data == "add_btn", state=AdState.buttons)
-async def add_btn(call: types.CallbackQuery):
-    await call.message.answer("Matn:")
-    await AdState.button_text.set()
-
-@dp.message_handler(state=AdState.button_text)
-async def btn_text(msg: types.Message, state: FSMContext):
-    await state.update_data(temp=msg.text)
-    await msg.answer("Link:")
-    await AdState.button_url.set()
-
-@dp.message_handler(state=AdState.button_url)
-async def btn_url(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    buttons = data.get("buttons", [])
-
-    buttons.append({"text": data["temp"], "url": msg.text})
-    await state.update_data(buttons=buttons)
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("➕ Yana", callback_data="add_btn"))
-    kb.add(InlineKeyboardButton("🚀 Yuborish", callback_data="send"))
-
-    await msg.answer("Qo‘shildi", reply_markup=kb)
-    await AdState.buttons.set()
-
 # ================= SEND =================
 @dp.callback_query_handler(lambda c: c.data == "send", state=AdState.buttons)
 async def send(call: types.CallbackQuery, state: FSMContext):
@@ -232,48 +216,32 @@ async def send(call: types.CallbackQuery, state: FSMContext):
 
     selected = data["selected"]
     content = data["content"]
-    buttons = data.get("buttons", [])
-
-    kb = None
-    if buttons:
-        kb = InlineKeyboardMarkup()
-        for b in buttons:
-            kb.add(InlineKeyboardButton(b["text"], url=b["url"]))
 
     success = 0
-    failed = []
-
     for cid in selected:
         try:
-            await content.send_copy(chat_id=cid, reply_markup=kb)
+            await content.send_copy(chat_id=cid)
             success += 1
         except:
-            failed.append(cid)
+            pass
 
     await log_ads(call.from_user.id, success)
 
-    text = f"✅ {success} ta yuborildi"
-    if failed:
-        text += f"\n❌ {len(failed)} ta xato"
-
-    await call.message.answer(text, reply_markup=main_menu(call.from_user.id))
+    await call.message.answer(f"✅ {success} ta yuborildi",
+                              reply_markup=main_menu(call.from_user.id))
     await state.finish()
 
 # ================= ADMIN =================
 @dp.callback_query_handler(lambda c: c.data == "admin")
 async def admin(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return
-
     stats = await get_stats()
 
     text = f"""
 📊 Statistika
 
-👤 Users: {stats['users']}
-📢 Ads: {stats['total_ads']}
+👤 Users: {stats.get('users', 0)}
+📢 Ads: {stats.get('total_ads', 0)}
 """
-
     await call.message.edit_text(text, reply_markup=back_kb())
 
 # ================= RUN =================
