@@ -1,5 +1,7 @@
 import logging
 import aiohttp
+import asyncio
+import datetime
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, types
@@ -9,7 +11,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 
-API_TOKEN = "7732017441:AAFH6HZrWQTqwMr1mp-u0t4xnnX9eePbt6w"
+API_TOKEN = "7732017441:AAHXi-rcV2be8qXAE-so43mh2n4rtzVZbc4"
 API_URL = "https://script.google.com/macros/s/AKfycbw7uZSzJxFVXTsbvf6-s35qujZcKtyQGqSTNeZTI0_9Bqbe2dYHebfIzbmWolOc0oC47Q/exec"
 ADMIN_ID = 7339714216
 
@@ -29,40 +31,66 @@ class AdState(StatesGroup):
     buttons = State()
     button_text = State()
     button_url = State()
+    schedule_time = State()
 
-# ================= SAFE API =================
+# ================= API =================
 async def safe_json(r):
     try:
         return await r.json()
     except:
-        txt = await r.text()
-        print("API RAW:", txt)
+        print("RAW:", await r.text())
         return []
 
 async def api_get(user_id):
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{API_URL}?action=get&user_id={user_id}") as r:
-                return await safe_json(r)
-    except:
-        return []
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{API_URL}?action=get&user_id={user_id}") as r:
+            return await safe_json(r)
 
 async def api_add(user_id, chat_id, title, type_):
     title = quote(title)
     async with aiohttp.ClientSession() as s:
-        async with s.get(
-            f"{API_URL}?action=add&user_id={user_id}&chat_id={chat_id}&title={title}&type={type_}"
-        ) as r:
+        async with s.get(f"{API_URL}?action=add&user_id={user_id}&chat_id={chat_id}&title={title}&type={type_}") as r:
             return await safe_json(r)
 
 async def log_ads(user_id, count):
     async with aiohttp.ClientSession() as s:
         await s.get(f"{API_URL}?action=log&user_id={user_id}&count={count}")
 
-async def get_stats():
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{API_URL}?action=stats") as r:
-            return await safe_json(r)
+# ================= SEND SYSTEM =================
+async def send_post(bot, msg, chat_id, kb=None):
+    try:
+        if msg.content_type == "text":
+            await bot.send_message(chat_id, msg.text, entities=msg.entities, reply_markup=kb)
+
+        elif msg.content_type == "photo":
+            await bot.send_photo(chat_id, msg.photo[-1].file_id,
+                                 caption=msg.caption,
+                                 caption_entities=msg.caption_entities,
+                                 reply_markup=kb)
+
+        elif msg.content_type == "video":
+            await bot.send_video(chat_id, msg.video.file_id,
+                                 caption=msg.caption,
+                                 caption_entities=msg.caption_entities,
+                                 reply_markup=kb)
+
+        elif msg.content_type == "animation":
+            await bot.send_animation(chat_id, msg.animation.file_id,
+                                     caption=msg.caption,
+                                     caption_entities=msg.caption_entities,
+                                     reply_markup=kb)
+
+        elif msg.content_type == "sticker":
+            await bot.send_sticker(chat_id, msg.sticker.file_id)
+
+        else:
+            await msg.send_copy(chat_id, reply_markup=kb)
+
+        return True
+
+    except Exception as e:
+        print("SEND ERROR:", e)
+        return False
 
 # ================= UI =================
 def main_menu(user_id):
@@ -70,13 +98,6 @@ def main_menu(user_id):
     kb.add(InlineKeyboardButton("➕ Qo‘shish", callback_data="add"))
     kb.add(InlineKeyboardButton("📢 Reklama", callback_data="ads"))
     kb.add(InlineKeyboardButton("📂 Meninglar", callback_data="my"))
-    if user_id == ADMIN_ID:
-        kb.add(InlineKeyboardButton("📊 Admin", callback_data="admin"))
-    return kb
-
-def back_kb():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🏠 Menu", callback_data="menu"))
     return kb
 
 def type_kb():
@@ -84,7 +105,6 @@ def type_kb():
     kb.add(InlineKeyboardButton("📢 Kanallar", callback_data="type_channel"))
     kb.add(InlineKeyboardButton("👥 Guruhlar", callback_data="type_group"))
     kb.add(InlineKeyboardButton("🌐 Hammasi", callback_data="type_all"))
-    kb.add(InlineKeyboardButton("❌ Bekor", callback_data="menu"))
     return kb
 
 def select_kb(chats, selected):
@@ -96,15 +116,35 @@ def select_kb(chats, selected):
     kb.add(InlineKeyboardButton("✅ Tanladim", callback_data="done"))
     return kb
 
+def preview_kb():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✏️ Edit", callback_data="edit"),
+        InlineKeyboardButton("➕ Tugma", callback_data="add_btn"),
+    )
+    kb.add(
+        InlineKeyboardButton("⏰ Schedule", callback_data="schedule"),
+        InlineKeyboardButton("🚀 Yuborish", callback_data="send")
+    )
+    kb.add(InlineKeyboardButton("❌ Bekor", callback_data="cancel"))
+    return kb
+
+def build_buttons(buttons):
+    kb = InlineKeyboardMarkup(row_width=2)
+    row = []
+    for i, b in enumerate(buttons, 1):
+        row.append(InlineKeyboardButton(b["text"], url=b["url"]))
+        if i % 2 == 0:
+            kb.row(*row)
+            row = []
+    if row:
+        kb.row(*row)
+    return kb
+
 # ================= START =================
 @dp.message_handler(commands=['start'])
 async def start(msg: types.Message):
     await msg.answer("👋 Xush kelibsiz", reply_markup=main_menu(msg.from_user.id))
-
-@dp.callback_query_handler(lambda c: c.data == "menu", state="*")
-async def menu(call: types.CallbackQuery, state: FSMContext):
-    await state.finish()
-    await call.message.edit_text("🏠 Menu", reply_markup=main_menu(call.from_user.id))
 
 # ================= ADD =================
 @dp.callback_query_handler(lambda c: c.data == "add")
@@ -126,24 +166,8 @@ async def save(msg: types.Message, state: FSMContext):
             return await msg.answer("⚠️ Allaqachon bor")
 
     await api_add(msg.from_user.id, chat.id, chat.title, type_)
-
     await msg.answer(f"✅ Qo‘shildi: {chat.title}", reply_markup=main_menu(msg.from_user.id))
     await state.finish()
-
-# ================= MY =================
-@dp.callback_query_handler(lambda c: c.data == "my")
-async def my(call: types.CallbackQuery):
-    data = await api_get(call.from_user.id)
-
-    if not data:
-        return await call.message.edit_text("❌ Bo‘sh", reply_markup=back_kb())
-
-    text = "📂 Ro‘yxat:\n\n"
-    for ch in data:
-        icon = "📢" if ch["type"] == "channel" else "👥"
-        text += f"{icon} {ch['title']}\n"
-
-    await call.message.edit_text(text, reply_markup=back_kb())
 
 # ================= ADS =================
 @dp.callback_query_handler(lambda c: c.data == "ads")
@@ -163,13 +187,10 @@ async def choose(call: types.CallbackQuery, state: FSMContext):
         return await AdState.content.set()
 
     filtered = [x for x in data if x["type"] == t]
-
     await state.update_data(chats=filtered, selected=[])
-
     await call.message.edit_text("Tanlang:", reply_markup=select_kb(filtered, []))
     await AdState.selecting.set()
 
-# ================= TOGGLE =================
 @dp.callback_query_handler(lambda c: c.data.startswith("toggle"), state=AdState.selecting)
 async def toggle(call: types.CallbackQuery, state: FSMContext):
     cid = call.data.split(":")[1]
@@ -184,13 +205,8 @@ async def toggle(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected=list(selected))
     await call.message.edit_reply_markup(reply_markup=select_kb(data["chats"], selected))
 
-# ================= DONE =================
 @dp.callback_query_handler(lambda c: c.data == "done", state=AdState.selecting)
 async def done(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if not data.get("selected"):
-        return await call.answer("Tanlanmadi", show_alert=True)
-
     await call.message.answer("📩 Kontent yuboring")
     await AdState.content.set()
 
@@ -200,13 +216,32 @@ async def content(msg: types.Message, state: FSMContext):
     await state.update_data(content=msg, buttons=[])
 
     await msg.answer("👁 Preview:")
-    await msg.send_copy(msg.chat.id)
+    await send_post(bot, msg, msg.chat.id)
 
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("➕ Tugma", callback_data="add_btn"))
-    kb.add(InlineKeyboardButton("🚀 Yuborish", callback_data="send"))
+    await msg.answer("Davom etamizmi?", reply_markup=preview_kb())
+    await AdState.buttons.set()
 
-    await msg.answer("Davom etamizmi?", reply_markup=kb)
+# ================= BUTTON ADD =================
+@dp.callback_query_handler(lambda c: c.data == "add_btn", state=AdState.buttons)
+async def add_btn(call: types.CallbackQuery):
+    await call.message.answer("Matn:")
+    await AdState.button_text.set()
+
+@dp.message_handler(state=AdState.button_text)
+async def btn_text(msg: types.Message, state: FSMContext):
+    await state.update_data(temp=msg.text)
+    await msg.answer("Link:")
+    await AdState.button_url.set()
+
+@dp.message_handler(state=AdState.button_url)
+async def btn_url(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    buttons = data.get("buttons", [])
+
+    buttons.append({"text": data["temp"], "url": msg.text})
+    await state.update_data(buttons=buttons)
+
+    await msg.answer("Qo‘shildi", reply_markup=preview_kb())
     await AdState.buttons.set()
 
 # ================= SEND =================
@@ -214,16 +249,13 @@ async def content(msg: types.Message, state: FSMContext):
 async def send(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
-    selected = data["selected"]
-    content = data["content"]
+    kb = build_buttons(data["buttons"]) if data.get("buttons") else None
 
     success = 0
-    for cid in selected:
-        try:
-            await content.send_copy(chat_id=cid)
+    for cid in data["selected"]:
+        ok = await send_post(bot, data["content"], int(cid), kb)
+        if ok:
             success += 1
-        except:
-            pass
 
     await log_ads(call.from_user.id, success)
 
@@ -231,18 +263,11 @@ async def send(call: types.CallbackQuery, state: FSMContext):
                               reply_markup=main_menu(call.from_user.id))
     await state.finish()
 
-# ================= ADMIN =================
-@dp.callback_query_handler(lambda c: c.data == "admin")
-async def admin(call: types.CallbackQuery):
-    stats = await get_stats()
-
-    text = f"""
-📊 Statistika
-
-👤 Users: {stats.get('users', 0)}
-📢 Ads: {stats.get('total_ads', 0)}
-"""
-    await call.message.edit_text(text, reply_markup=back_kb())
+# ================= CANCEL =================
+@dp.callback_query_handler(lambda c: c.data == "cancel", state="*")
+async def cancel(call: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await call.message.edit_text("❌ Bekor qilindi", reply_markup=main_menu(call.from_user.id))
 
 # ================= RUN =================
 if __name__ == "__main__":
